@@ -8,7 +8,7 @@
     const APR_THRESHOLD = 0.00001; // Minimum APR (greater than 0% as a decimal)
     const VIEW_ALL_LOAD_TIMEOUT = 20000; // 20 seconds for View All page content (primarily for initial load of View #3)
     // ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING: Set to a number to limit processed vaults for testing, or false to process all.
-    const ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING = 2;
+    const ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING = false;
     const VIEW_ALL_CONTENT_RENDER_DELAY = 1000; // Fixed delay after rows appear in View #3 (primarily for initial load)
 
     // --- Selectors (CRITICAL - VERIFY AND ADJUST THESE FOR YOUR TARGET SITE) ---
