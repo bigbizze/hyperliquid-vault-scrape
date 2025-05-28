@@ -1,3 +1,4 @@
+
 // Enhanced Vault Scraper - JSON Output
 (async function() {
     console.log('Starting Enhanced Vault Data Extraction (JSON Output)...');
@@ -10,18 +11,25 @@
     // ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING: Set to a number to limit processed vaults for testing, or false to process all.
     const ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING = false;
     const VIEW_ALL_CONTENT_RENDER_DELAY = 1000; // Fixed delay after rows appear in View #3 (primarily for initial load)
+    const MIN_ROWS_TO_CONSIDER_LOADED_VIEW3 = 5; // Min rows to wait for in View #3 before considering loaded
+    const BLACKLIST_ADDRESSES = [
+        "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303", // Hyperliquidity Provider (HLP)
+        "0x63c621a33714ec48660e32f2374895c8026a3a00" // Liquidator
+    ];
+    const MAX_MAIN_PAGES = 60; // Assuming page size is 10 (which is default), only parse the first 600 vaults
 
     // --- Selectors (CRITICAL - VERIFY AND ADJUST THESE FOR YOUR TARGET SITE) ---
-    // Main list selectors
-    const SELECTOR_MAIN_LIST_PAGINATION_NEXT = 'div.sc-jSUZER:last-child';
-    const SELECTOR_MAIN_LIST_PAGINATION_DISABLED_CLASS = 'cOLbBh'; // Common disabled class for pagination buttons
+    // Main list selectors (View #1)
+    const SELECTOR_MAIN_LIST_TABLE_ROWS = "table tbody tr";
+    const SELECTOR_MAIN_LIST_PAGINATION_CONTROLS_CONTAINER_VIEW1 = '#root > div.sc-fEXmlR.ejmSgi > div:nth-child(3) > div > div > div > div.sc-iBYQkv.bCwfSg > div:nth-child(2) > div > div:nth-child(6) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2)';
+    const SELECTOR_MAIN_LIST_PAGINATION_INFO_TEXT_VIEW1 = '.sc-bjfHbI.bFBYgR';
+    const SELECTOR_MAIN_LIST_PAGINATION_DISABLED_CLASS = 'cOLbBh';
 
     // Vault Detail Page (View #2) Selectors
     const SELECTOR_BREADCRUMB_TO_MAIN_LIST_VIEW2 = '#root > div > div:nth-child(3) > div > div > div > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > a';
 
     // Top Tab Menu (View #2)
     const SELECTOR_VAULT_PERFORMANCE_TAB_VIEW2 = '#root > div > div:nth-child(3) > div > div > div > div:nth-child(3) > div > div:nth-child(1) > div > div:nth-child(3)';
-    // Updated selector for the direct value elements of PNL, Max Drawdown, etc.
     const SELECTOR_VAULT_PERFORMANCE_VALUE_ELEMENTS_VIEW2 = "#root > div.sc-fEXmlR.ejmSgi > div:nth-child(3) > div > div > div > div:nth-child(3) > div.sc-fEXmlR.ejmSgi > div:nth-child(1) > div:nth-child(2) > div > div > div:nth-child(2)";
 
     const SELECTOR_PAST_MONTH_RETURN_VIEW2 = '#root > div.sc-fEXmlR.ejmSgi > div:nth-child(3) > div > div > div > div:nth-child(2) > div:nth-child(2) > div > div > div > span';
@@ -37,15 +45,10 @@
         depositors: '#root > div > div:nth-child(3) > div > div > div > div:nth-child(3) > div:nth-child(2) > div > div > div > div:nth-child(7)',
     };
 
-    // "View All" button selector (generic, might need refinement per tab context)
     const SELECTOR_VIEW_ALL_BUTTON_GENERIC = '#root > div > div:nth-child(3) > div > div > div > div:nth-child(3) > div:nth-child(2) > div > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(1) > a';
-
-    // Table Class for Detail/View All pages
     const DETAIL_TABLE_CLASS_SELECTOR = 'table.sc-jfTVlA.fNOlaI';
-    // Container for pagination controls on View #3 (Expanded Table Page)
     const SELECTOR_EXPANDED_TABLE_PAGINATION_CONTROLS_CONTAINER_VIEW3 = '#root > div > div:nth-child(3) > div > div > div > div > div > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2)';
-    // Selector for the text like "1-25 of 1332" within the pagination controls container
-    const SELECTOR_PAGINATION_INFO_TEXT_VIEW3 = '.sc-bjfHbI.bFBYgR'; // This is based on your HTML for the info text itself.
+    const SELECTOR_PAGINATION_INFO_TEXT_VIEW3 = '.sc-bjfHbI.bFBYgR';
 
     // --- Global Data Storage ---
     const allVaultsData = [];
@@ -103,10 +106,8 @@
     function getElementText(element, selector, defaultValue = '') {
         const el = selector ? element.querySelector(selector) : element;
         if (el) {
-            // This function is more for complex cells. For direct value elements, use textContent directly.
             const valueEl = el.querySelector('div:nth-child(2) > span, div:nth-child(2)');
             if (valueEl) return valueEl.textContent.trim();
-
             const mainSpan = el.matches && el.matches('td') ? el.querySelector(':scope > span:first-child, :scope > div:first-child > span:first-child, :scope > div:first-child') : null;
             if (mainSpan) return mainSpan.textContent.trim();
             return el.textContent.trim();
@@ -148,7 +149,6 @@
 
         return {
             vaultName: vaultName,
-            leader: getElementText(cells[1]),
             aprText: aprText,
             tvlText: tvlText,
             yourDepositText: getElementText(cells[4]),
@@ -157,18 +157,26 @@
         };
     }
 
-    async function extractPaginatedTableDataView3(tableSelector, rowParsingFn, paginationControlsContainerSelector, parentElementForTable = document, maxPagesFallback = 200) {
+    async function extractPaginatedTableDataView3(
+      vaultName, tabName,
+      tableSelector, rowParsingFn, paginationControlsContainerSelector, parentElementForTable = document, maxPagesFallback = 200
+    ) {
+        const consolePrep = type => (...args) => {
+          console[type](`[View #3 - ${vaultName} - ${tabName}]`, ...args);
+        }
+        const consoleLog = consolePrep("log");
+        const consoleWarn = consolePrep("warn");
         const allRowsData = [];
         let currentPageNum = 1;
         let calculatedTotalPages = null;
         const rowsSelector = tableSelector + ' tbody tr';
 
-        console.log(`View #3: Extracting paginated data from table: ${tableSelector} using pagination container: ${paginationControlsContainerSelector}`);
+        consoleLog(`View #3: Extracting paginated data from table: ${tableSelector} using pagination container: ${paginationControlsContainerSelector}`);
 
         // --- Rewind to first page ---
         let rewindAttempts = 0;
         const MAX_REWIND_ATTEMPTS = 20;
-        console.log("View #3: Attempting to rewind to the first page...");
+        consoleLog("View #3: Attempting to rewind to the first page...");
         while (rewindAttempts < MAX_REWIND_ATTEMPTS) {
             const paginationControlsContainer = parentElementForTable.querySelector(paginationControlsContainerSelector);
             let prevButton = null;
@@ -179,58 +187,65 @@
                 }
             }
             if (prevButton && !prevButton.hasAttribute('disabled') && !prevButton.classList.contains(SELECTOR_MAIN_LIST_PAGINATION_DISABLED_CLASS) && !prevButton.closest('[disabled]')) {
-                console.log(`View #3: Previous button is enabled. Clicking to go to previous page (Attempt ${rewindAttempts + 1}).`);
+                consoleLog(`View #3: Previous button is enabled. Clicking to go to previous page (Attempt ${rewindAttempts + 1}).`);
                 await clickElementAndWait(prevButton, BASE_WAIT_TIME, tableSelector, parentElementForTable);
                 rewindAttempts++;
             } else {
-                console.log("View #3: Previous button is disabled or not found. Assuming on the first page.");
+                consoleLog("View #3: Previous button is disabled or not found. Assuming on the first page.");
                 break;
             }
         }
         if (rewindAttempts >= MAX_REWIND_ATTEMPTS) {
-            console.warn("View #3: Reached max rewind attempts. Proceeding from current page.");
+            consoleWarn("View #3: Reached max rewind attempts. Proceeding from current page.");
         }
         // --- End Rewind ---
 
         // Initial table and row load for the first page
-        let initialTableElement;
+        let tableElement; // Renamed from initialTableElement
         try {
-            initialTableElement = await waitForSelector(tableSelector, 10000, parentElementForTable);
+            tableElement = await waitForSelector(tableSelector, 10000, parentElementForTable);
         } catch (e) {
-            console.warn(`View #3: Initial table "${tableSelector}" not found. Error: ${e.message}`);
+            consoleWarn(`View #3: Initial table "${tableSelector}" not found. Error: ${e.message}`);
             return allRowsData;
         }
 
-        let initialRowsFound = false;
-        let initialTimeElapsed = 0;
-        console.log(`View #3: Waiting for initial rows in "${rowsSelector}" (max ${VIEW_ALL_LOAD_TIMEOUT/1000}s)...`);
-        while(initialTimeElapsed < VIEW_ALL_LOAD_TIMEOUT) {
-            if (parentElementForTable.querySelectorAll(rowsSelector).length > 0) {
-                initialRowsFound = true;
+        let initialPageRowsFoundCount = 0;
+        let initialPageTimeElapsed = 0;
+        consoleLog(`View #3: Waiting for at least ${MIN_ROWS_TO_CONSIDER_LOADED_VIEW3} initial rows in "${rowsSelector}" (max ${VIEW_ALL_LOAD_TIMEOUT/1000}s)...`);
+        while(
+          initialPageTimeElapsed < VIEW_ALL_LOAD_TIMEOUT
+          || (currentPageNum === 1 && initialPageRowsFoundCount < MIN_ROWS_TO_CONSIDER_LOADED_VIEW3)
+        ) {
+            initialPageRowsFoundCount = parentElementForTable.querySelectorAll(rowsSelector).length;
+            if (initialPageRowsFoundCount >= MIN_ROWS_TO_CONSIDER_LOADED_VIEW3) {
+                consoleLog(`View #3: Found ${initialPageRowsFoundCount} initial rows. Proceeding.`);
                 break;
             }
             await sleep(500);
-            initialTimeElapsed += 500;
+            initialPageTimeElapsed += 500;
         }
 
-        if (!initialRowsFound) {
-            throw new Error(`View #3: Timeout! Initial rows did not load in table "${tableSelector}" after ${VIEW_ALL_LOAD_TIMEOUT/1000}s.`);
+        if (currentPageNum === 1 && initialPageRowsFoundCount < MIN_ROWS_TO_CONSIDER_LOADED_VIEW3) {
+            if (initialPageRowsFoundCount === 0) {
+                throw new Error(`View #3: Timeout! Absolutely 0 rows loaded in table "${tableSelector}" after ${VIEW_ALL_LOAD_TIMEOUT/1000}s.`);
+            } else {
+                consoleWarn(`View #3: Found only ${initialPageRowsFoundCount} initial rows (expected at least ${MIN_ROWS_TO_CONSIDER_LOADED_VIEW3}). Proceeding with what was found.`);
+            }
         }
-        console.log(`View #3: Initial row structures found. Applying fixed delay for content rendering...`);
+        consoleLog(`View #3: Initial row structures processed. Applying fixed delay for content rendering...`);
         await sleep(VIEW_ALL_CONTENT_RENDER_DELAY);
-
 
         // --- Parse total pages (ONLY ONCE after initial load of View #3, page 1) ---
         try {
-            console.log("View #3: Attempting to parse total pages (after initial load)...");
+            consoleLog("View #3: Attempting to parse total pages (after initial load)...");
             let paginationControls = await waitForSelector(paginationControlsContainerSelector, 5000, parentElementForTable);
             let infoTextElement = null;
             let infoText = "";
             let attemptsToGetValidInfoText = 0;
-            const MAX_INFO_TEXT_ATTEMPTS = 10; // Try for 10 * 250ms = 2.5 seconds
+            const MAX_INFO_TEXT_ATTEMPTS = 10;
 
             while(attemptsToGetValidInfoText < MAX_INFO_TEXT_ATTEMPTS) {
-                paginationControls = parentElementForTable.querySelector(paginationControlsContainerSelector); // Re-query
+                paginationControls = parentElementForTable.querySelector(paginationControlsContainerSelector);
                 if (paginationControls) {
                     const infoElements = paginationControls.querySelectorAll(SELECTOR_PAGINATION_INFO_TEXT_VIEW3);
                     for (const el of infoElements) {
@@ -241,12 +256,16 @@
                                 infoTextElement = el;
                                 infoText = currentText;
                                 break;
+                            } else if (tempMatch && parseInt(tempMatch[3].replace(/,/g, '')) === 0 && (parseInt(tempMatch[1]) === 1 && parseInt(tempMatch[2]) === 0) ) {
+                                infoTextElement = el;
+                                infoText = currentText;
+                                break;
                             }
                         }
                     }
                 }
-                if (infoTextElement && infoText) break; // Exit if valid info found
-                console.log(`View #3: Pagination info text not yet valid or shows 0 total. Attempt ${attemptsToGetValidInfoText + 1}. Waiting...`);
+                if (infoTextElement && infoText) break;
+                consoleLog(`View #3: Pagination info text not yet valid or shows 0 total. Attempt ${attemptsToGetValidInfoText + 1}. Waiting...`);
                 await sleep(250);
                 attemptsToGetValidInfoText++;
             }
@@ -257,106 +276,118 @@
                 if (match) {
                     const rowsPerPage = parseInt(match[2]) - parseInt(match[1]) + 1;
                     const totalRows = parseInt(match[3].replace(/,/g, ''));
-                    if (rowsPerPage > 0 && totalRows >= 0) { // Allow totalRows to be 0 if that's what the page says after loading
+                    if (totalRows === 0 && rowsPerPage === 0) {
+                        calculatedTotalPages = 0;
+                        consoleLog(`View #3: Parsed pagination: 0 total rows, 0 total pages.`);
+                    } else if (rowsPerPage > 0 && totalRows > 0) {
                         calculatedTotalPages = Math.ceil(totalRows / rowsPerPage);
-                        console.log(`View #3: Parsed pagination: ${rowsPerPage} rows/page, ${totalRows} total rows, ${calculatedTotalPages} total pages.`);
-                    } else {
-                         console.warn("View #3: Could not parse valid rowsPerPage or totalRows from info text:", infoText);
+                        consoleLog(`View #3: Parsed pagination: ${rowsPerPage} rows/page, ${totalRows} total rows, ${calculatedTotalPages} total pages.`);
+                    }
+                    else {
+                         consoleWarn("View #3: Could not parse valid rowsPerPage or totalRows from info text:", infoText);
                     }
                 } else {
-                    console.warn("View #3: Pagination info text did not match expected format:", infoText);
+                    consoleWarn("View #3: Pagination info text did not match expected format:", infoText);
                 }
             } else {
-                console.warn("View #3: Pagination info text element (e.g., '1-25 of X' with X > 0) not found or did not become valid within timeout.");
+                consoleWarn("View #3: Pagination info text element (e.g., '1-25 of X' with X > 0) not found or did not become valid within timeout.");
             }
         } catch (e) {
-            console.warn("View #3: Error parsing total pages from pagination info:", e.message, "Falling back to maxPagesFallback or next button logic.");
+            consoleWarn("View #3: Error parsing total pages from pagination info:", e.message, "Falling back to maxPagesFallback or next button logic.");
         }
         // --- End Parse total pages ---
 
         const loopLimit = calculatedTotalPages !== null ? calculatedTotalPages : maxPagesFallback;
-        console.log(`View #3: Loop limit set to: ${loopLimit} (Calculated: ${calculatedTotalPages}, Fallback: ${maxPagesFallback})`);
+        consoleLog(`View #3: Loop limit set to: ${loopLimit} (Calculated: ${calculatedTotalPages}, Fallback: ${maxPagesFallback})`);
 
+        if (loopLimit === 0 && calculatedTotalPages === 0) {
+             consoleLog("View #3: Table confirmed to have 0 pages. Skipping row processing loop.");
+        } else {
+            while (currentPageNum <= loopLimit) {
+                const isCurrentPageTheFirst = (currentPageNum === 1);
+                const tableLoadWait = isCurrentPageTheFirst ? 0 : BASE_WAIT_TIME * 2; // No wait if table already loaded for page 1
+                const rowLoadTimeoutForPage = isCurrentPageTheFirst ? 0 : BASE_WAIT_TIME * 4;
+                const contentRenderDelayForPage = isCurrentPageTheFirst ? 0 : BASE_WAIT_TIME;
 
-        while (currentPageNum <= loopLimit) {
-            const isFirstPageOfThisView3Load = (currentPageNum === 1);
-            // For subsequent pages, use shorter, BASE_WAIT_TIME-based waits
-            const tableLoadWait = isFirstPageOfThisView3Load ? 10000 : BASE_WAIT_TIME * 2;
-            const rowLoadTimeoutForPage = isFirstPageOfThisView3Load ? VIEW_ALL_LOAD_TIMEOUT : BASE_WAIT_TIME * 4;
-            const contentRenderDelayForPage = isFirstPageOfThisView3Load ? VIEW_ALL_CONTENT_RENDER_DELAY : BASE_WAIT_TIME;
+                let currentTableElement = tableElement; // Use the initially found table for page 1
 
-            let tableElementCurrentPage;
-            if (currentPageNum > 1) {
-                try {
-                    tableElementCurrentPage = await waitForSelector(tableSelector, tableLoadWait, parentElementForTable);
-                } catch (e) {
-                    console.warn(`View #3: Table "${tableSelector}" not found on page ${currentPageNum}. Error: ${e.message}`);
-                    break;
-                }
-            } else {
-                tableElementCurrentPage = initialTableElement;
-            }
-
-            if (currentPageNum > 1 || !initialRowsFound) { // If not first page, or if initial rows weren't pre-checked
-                let rowsFoundOnSubsequentPage = false;
-                let timeElapsedSubsequent = 0;
-                console.log(`View #3: Waiting for rows on page ${currentPageNum} (max ${rowLoadTimeoutForPage/1000}s)...`);
-                while(timeElapsedSubsequent < rowLoadTimeoutForPage) {
-                    if (parentElementForTable.querySelectorAll(rowsSelector).length > 0) {
-                        rowsFoundOnSubsequentPage = true;
+                if (!isCurrentPageTheFirst) { // For subsequent pages, re-wait for table and rows
+                    try {
+                        currentTableElement = await waitForSelector(tableSelector, tableLoadWait, parentElementForTable);
+                    } catch (e) {
+                        consoleWarn(`View #3: Table "${tableSelector}" not found on page ${currentPageNum}. Error: ${e.message}`);
                         break;
                     }
-                    await sleep(250);
-                    timeElapsedSubsequent += 250;
+
+                    let rowsFoundOnSubsequentPage = false;
+                    let timeElapsedSubsequent = 0;
+                    const subsequentMinRows = MIN_ROWS_TO_CONSIDER_LOADED_VIEW3;
+                    consoleLog(`View #3: Waiting for at least ${subsequentMinRows} rows on page ${currentPageNum} (max ${rowLoadTimeoutForPage/1000}s)...`);
+                    while(timeElapsedSubsequent < rowLoadTimeoutForPage) {
+                        const currentNumRows = parentElementForTable.querySelectorAll(rowsSelector).length;
+                        if (currentNumRows >= subsequentMinRows) {
+                            rowsFoundOnSubsequentPage = true;
+                            consoleLog(`View #3: Found ${currentNumRows} rows on page ${currentPageNum}.`);
+                            break;
+                        }
+                        await sleep(250);
+                        timeElapsedSubsequent += 250;
+                    }
+                    if (rowsFoundOnSubsequentPage) {
+                        consoleLog(`View #3: Applying content render delay: ${contentRenderDelayForPage}ms`);
+                        await sleep(contentRenderDelayForPage);
+                    } else {
+                        const rowsActuallyFound = parentElementForTable.querySelectorAll(rowsSelector).length;
+                        if (rowsActuallyFound > 0) {
+                            consoleWarn(`View #3: Found only ${rowsActuallyFound} rows on page ${currentPageNum} (expected at least ${subsequentMinRows}). Proceeding with what was found.`);
+                        } else {
+                            consoleLog(`View #3: No rows found in table "${tableSelector}" on page ${currentPageNum} after waiting. Ending pagination.`);
+                            break;
+                        }
+                    }
                 }
-                if (rowsFoundOnSubsequentPage) {
-                    console.log(`View #3: Rows found on page ${currentPageNum}. Applying content render delay: ${contentRenderDelayForPage}ms`);
-                    await sleep(contentRenderDelayForPage);
+
+                const rows = currentTableElement.querySelectorAll('tbody tr');
+                consoleLog(`View #3: Table "${tableSelector}", page ${currentPageNum}: Found ${rows.length} rows for parsing.`);
+                rows.forEach(row => {
+                    const data = rowParsingFn(row);
+                    if (data) allRowsData.push(data);
+                });
+
+                if (calculatedTotalPages !== null && currentPageNum >= calculatedTotalPages) {
+                    consoleLog(`View #3: Reached calculated last page (${currentPageNum}/${calculatedTotalPages}).`);
+                    break;
+                }
+
+                const paginationControlsContainerCurrentPage = parentElementForTable.querySelector(paginationControlsContainerSelector);
+                let nextButton = null;
+                if (paginationControlsContainerCurrentPage) {
+                    const buttons = paginationControlsContainerCurrentPage.querySelectorAll(':scope > div');
+                    if (buttons.length > 0) {
+                        nextButton = buttons[buttons.length - 1];
+                    }
                 } else {
-                     console.log(`View #3: No rows found in table "${tableSelector}" on page ${currentPageNum} after waiting. Ending pagination.`);
+                     consoleWarn(`View #3: Pagination controls container not found on page ${currentPageNum}. Cannot find next button.`);
                      break;
                 }
-            }
 
-            const rows = tableElementCurrentPage.querySelectorAll('tbody tr');
-            console.log(`View #3: Table "${tableSelector}", page ${currentPageNum}: Found ${rows.length} rows for parsing.`);
-            rows.forEach(row => {
-                const data = rowParsingFn(row);
-                if (data) allRowsData.push(data);
-            });
-
-            if (calculatedTotalPages !== null && currentPageNum >= calculatedTotalPages) {
-                console.log(`View #3: Reached calculated last page (${currentPageNum}/${calculatedTotalPages}).`);
-                break;
-            }
-
-            const paginationControlsContainerCurrentPage = parentElementForTable.querySelector(paginationControlsContainerSelector);
-            let nextButton = null;
-            if (paginationControlsContainerCurrentPage) {
-                const buttons = paginationControlsContainerCurrentPage.querySelectorAll(':scope > div');
-                if (buttons.length > 0) {
-                    nextButton = buttons[buttons.length - 1];
-                }
-            } else {
-                 console.warn(`View #3: Pagination controls container not found on page ${currentPageNum}. Cannot find next button.`);
-                 break;
-            }
-
-            if (nextButton && !nextButton.hasAttribute('disabled') && !nextButton.classList.contains(SELECTOR_MAIN_LIST_PAGINATION_DISABLED_CLASS) && !nextButton.closest('[disabled]')) {
-                console.log(`View #3: Clicking next page (current: ${currentPageNum}, going to ${currentPageNum + 1})...`);
-                // Wait for the table of the *next* page to be ready.
-                await clickElementAndWait(nextButton, BASE_WAIT_TIME, tableSelector, parentElementForTable);
-                currentPageNum++;
-            } else {
-                if (calculatedTotalPages !== null && currentPageNum < calculatedTotalPages) {
-                    console.warn(`View #3: Next button appears disabled/not found on page ${currentPageNum}, but calculated total pages is ${calculatedTotalPages}. Stopping pagination early.`);
+                if (nextButton && !nextButton.hasAttribute('disabled') && !nextButton.classList.contains(SELECTOR_MAIN_LIST_PAGINATION_DISABLED_CLASS) && !nextButton.closest('[disabled]')) {
+                    consoleLog(`View #3: Clicking next page (current: ${currentPageNum}, going to ${currentPageNum + 1})...`);
+                    // Wait for the table structure of the *next* page to appear.
+                    await clickElementAndWait(nextButton, BASE_WAIT_TIME, tableSelector, parentElementForTable);
+                    currentPageNum++;
                 } else {
-                    console.log(`View #3: No more pages or "Next" button disabled/not found for table on page ${currentPageNum}.`);
+                    if (calculatedTotalPages !== null && currentPageNum < calculatedTotalPages) {
+                        consoleWarn(`View #3: Next button appears disabled/not found on page ${currentPageNum}, but calculated total pages is ${calculatedTotalPages}. Stopping pagination early.`);
+                    } else {
+                        consoleLog(`View #3: No more pages or "Next" button disabled/not found for table on page ${currentPageNum}.`);
+                    }
+                    break;
                 }
-                break;
-            }
-        }
-        if (currentPageNum > loopLimit && loopLimit === maxPagesFallback) console.warn(`View #3: Reached max pages fallback (${maxPagesFallback}) for table: ${tableSelector}`);
+            } // End while (currentPageNum <= loopLimit)
+        } // End else (if loopLimit > 0)
+
+        if (currentPageNum > loopLimit && loopLimit === maxPagesFallback) consoleWarn(`View #3: Reached max pages fallback (${maxPagesFallback}) for table: ${tableSelector}`);
         return allRowsData;
     }
 
@@ -417,14 +448,9 @@
 
         console.log(`View #2: Clicking bottom tab: ${tabKeyName}`);
         // Ensure the tab content area (specifically the table) is ready after clicking the tab
-        await clickElementAndWait(tabSelector, BASE_WAIT_TIME * 0.75, tableSelector);
-
-
-        let viewAllButton = null;
-        try {
-            viewAllButton = document.querySelector(SELECTOR_VIEW_ALL_BUTTON_GENERIC);
-             if (viewAllButton && viewAllButton.offsetParent === null) viewAllButton = null;
-        } catch(e) { /* ignore */ }
+        await clickElementAndWait(tabSelector, Math.max(BASE_WAIT_TIME, 250), tableSelector);
+        let viewAllButton = Array.from(document.querySelectorAll("#root > div.sc-fEXmlR.ejmSgi > div:nth-child(3) > div > div > div > div:nth-child(3) > div:nth-child(2) > div > div:nth-child(2) > div:nth-child(2) > div > div > a"))
+          .find(elem => elem.textContent.toLowerCase() === "view all");
 
         if (viewAllButton) {
             console.log(`View #2: "View All" button found for ${tabKeyName}. Navigating to View #3...`);
@@ -432,6 +458,8 @@
             await clickElementAndWait(viewAllButton, BASE_WAIT_TIME, tableSelector);
 
             vaultData[`${tabKeyName}Data`] = await extractPaginatedTableDataView3(
+                vaultData.vaultName,
+                tabKeyName,
                 tableSelector,
                 rowParser,
                 SELECTOR_EXPANDED_TABLE_PAGINATION_CONTROLS_CONTAINER_VIEW3
@@ -534,18 +562,41 @@
     await sleep(BASE_WAIT_TIME / 2);
 
     let mainListPageNum = 0;
-    const MAX_MAIN_PAGES = 100;
+    // const MAX_MAIN_PAGES = 100; // This is now effectively controlled by the pagination logic itself
 
     outerLoop:
-    while (mainListPageNum < MAX_MAIN_PAGES) {
+    while (true) { // Loop indefinitely until "Next" button is no longer clickable or MAX_MAIN_PAGES is hit (if re-enabled)
         mainListPageNum++;
+        if (mainListPageNum > MAX_MAIN_PAGES) { // Safety break
+            console.warn(`Reached MAX_MAIN_PAGES limit of ${MAX_MAIN_PAGES}. Stopping.`);
+            break;
+        }
         console.log(`\nProcessing Main Vault List Page (View #1): ${mainListPageNum}`);
         await sleep(BASE_WAIT_TIME);
 
         let currentVaultRowIndexOnPage = 0;
         const PROCESSED_ON_PAGE_LIMIT = 200;
         let processedOnThisPage = 0;
-        let vaultDetailURL = null; // Declare vaultDetailURL here
+        let vaultDetailURL = null;
+
+        // Get all tables, then select the last one for User Vaults
+        const allTables = document.querySelectorAll("table");
+        let userVaultsTable = null;
+        if (allTables.length > 0) {
+            userVaultsTable = allTables[allTables.length -1];
+        }
+
+        const allMainListTableRows = userVaultsTable ? userVaultsTable.querySelectorAll("tbody tr") : [];
+
+        if (allMainListTableRows.length === 0 && currentVaultRowIndexOnPage === 0) {
+             console.warn(`View #1: No vault rows found in the last table on page ${mainListPageNum}.`);
+             if (mainListPageNum === 1) {
+                console.error("View #1: Critical error - No rows in the last table on the first page. Script might be on wrong page or selectors are incorrect.");
+                return;
+             }
+             // If not the first page, and no rows, it might be an empty last page. Try to paginate.
+        }
+
 
         while(processedOnThisPage < PROCESSED_ON_PAGE_LIMIT) {
             if (ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING !== false && processedEligibleVaultsCount >= ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING) {
@@ -553,31 +604,19 @@
                 break outerLoop;
             }
 
-            const allMainListTableRows = document.querySelectorAll("table tbody tr");
+            // Re-fetch rows for each iteration in case DOM changes after returning from View #2
+            const currentMainListTableRows = userVaultsTable ? userVaultsTable.querySelectorAll("tbody tr") : [];
 
-            if (allMainListTableRows.length === 0 && mainListPageNum === 1 && currentVaultRowIndexOnPage === 0) {
-                 console.error("View #1: No vault rows found on the very first attempt. Ensure you are on the correct page.");
-                 return;
-            }
-
-            if (currentVaultRowIndexOnPage >= allMainListTableRows.length) {
-                console.log(`View #1: All ${allMainListTableRows.length} potential rows on page ${mainListPageNum} checked.`);
+            if (currentVaultRowIndexOnPage >= currentMainListTableRows.length) {
+                console.log(`View #1: All ${currentMainListTableRows.length} potential rows in the last table on page ${mainListPageNum} checked.`);
                 break;
             }
 
-            // Skip first two rows only on the very first main list page
-            if (isFirstMainListPage && currentVaultRowIndexOnPage < 2) {
-                console.log(`View #1 (Page 1): Skipping potential Protocol Vault row ${currentVaultRowIndexOnPage + 1}`);
-                currentVaultRowIndexOnPage++;
-                processedOnThisPage++;
-                continue;
-            }
-
-            const currentRowElement = allMainListTableRows[currentVaultRowIndexOnPage];
+            const currentRowElement = currentMainListTableRows[currentVaultRowIndexOnPage];
             const baseVaultData = extractMainListRowBaseData(currentRowElement);
 
             if (baseVaultData && baseVaultData.isEligible) {
-                console.log(`View #1: Processing eligible vault (${processedEligibleVaultsCount + 1}/${ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING === false ? 'All' : ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING}): "${baseVaultData.vaultName}" (Row ${currentVaultRowIndexOnPage + 1}/${allMainListTableRows.length} on page)`);
+                console.log(`View #1: Processing eligible vault (${processedEligibleVaultsCount + 1}/${ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING === false ? 'All' : ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING}): "${baseVaultData.vaultName}" (Row ${currentVaultRowIndexOnPage + 1}/${currentMainListTableRows.length} on page)`);
 
                 let clickableElementToDetail = currentRowElement.querySelector('td:first-child a');
                 if (!clickableElementToDetail) clickableElementToDetail = currentRowElement.querySelector('td:first-child');
@@ -590,15 +629,29 @@
                 }
 
                 vaultDetailURL = null; // Reset for each attempt
-                console.log(`Getting information on vault: ${baseVaultData.vaultName}`)
+
                 try {
                     await clickElementAndWait(clickableElementToDetail, Math.max(BASE_WAIT_TIME * 1.5, 1000), SELECTOR_VAULT_PERFORMANCE_TAB_VIEW2);
                     vaultDetailURL = window.location.href; // Assign here after successful navigation
 
+                    const contractAddress = vaultDetailURL.split('/').pop().split('?')[0]; // Get last path segment, remove query params
+                    baseVaultData.address = contractAddress;
+
+                    if (BLACKLIST_ADDRESSES.includes(contractAddress)) {
+                        console.log(`View #2: Vault address ${contractAddress} is blacklisted. Skipping.`);
+                        window.history.back();
+                        await sleep(Math.max(BASE_WAIT_TIME * 1.5, 1000));
+                        await waitForSelector("table tbody tr", 15000); // Wait for main list to reload
+                        // currentVaultRowIndexOnPage is incremented at the end of the loop
+                        processedOnThisPage++; // Still counts as a processed row for the page limit
+                        continue;
+                    }
+
+
                     await scrapeVaultPerformanceDataView2(baseVaultData);
 
                     for (const tabKey of Object.keys(SELECTORS_BOTTOM_TABS_VIEW2)) {
-                        await sleep(BASE_WAIT_TIME / 2); // Small delay before processing each bottom tab
+                        await sleep(BASE_WAIT_TIME / 2);
                         await scrapeBottomTab(tabKey, baseVaultData, vaultDetailURL);
                     }
 
@@ -610,15 +663,16 @@
                     await sleep(Math.max(BASE_WAIT_TIME * 1.5, 1000));
                     await waitForSelector("table tbody tr", 15000);
                     await sleep(BASE_WAIT_TIME * 0.5);
+                    userVaultsTable = document.querySelectorAll("table")[document.querySelectorAll("table").length -1]; // Re-select the table after navigating back
 
                 } catch (error) {
                     console.error(`Error processing vault "${baseVaultData.vaultName}": ${error.message}`, error.stack);
                     try {
                         console.warn("Attempting to navigate back to main list (View #1) after error...");
-                        if (vaultDetailURL && window.location.href === vaultDetailURL) { // Only go back if still on detail page
+                        if (vaultDetailURL && window.location.href === vaultDetailURL) {
                             window.history.back();
                             await sleep(BASE_WAIT_TIME * 2);
-                        } else if (!vaultDetailURL) { // If navigation to detail page failed
+                        } else if (!vaultDetailURL) {
                              console.log("Navigation to detail page might have failed. Attempting generic history.back().");
                              window.history.back();
                              await sleep(BASE_WAIT_TIME * 2);
@@ -626,6 +680,7 @@
                              console.log("Already navigated away from detail page or error occurred before full detail page load.");
                         }
                         await waitForSelector("table tbody tr", 15000);
+                        userVaultsTable = document.querySelectorAll("table")[document.querySelectorAll("table").length -1]; // Re-select table
                     } catch (navError) {
                         console.error("Error navigating back after detail page error:", navError);
                     }
@@ -641,8 +696,17 @@
         if (ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING !== false && processedEligibleVaultsCount >= ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING) {
             break;
         }
-
-        const mainListNextButton = document.querySelector(SELECTOR_MAIN_LIST_PAGINATION_NEXT);
+        let buttonControls = Array.from(document.querySelectorAll("#root > div.sc-fEXmlR.ejmSgi > div:nth-child(3) > div > div > div > div.sc-iBYQkv.bCwfSg > div:nth-child(2) > div > div:nth-child(6) > div:nth-child(2) > div:nth-child(2) > div > div") ?? []);
+        let buttonControlFindAttempts = 0;
+        while (!buttonControls.length) {
+          await sleep(Math.max(BASE_WAIT_TIME * 1.5, Math.max(1000 * (buttonControlFindAttempts + 1), 5000)));
+          buttonControls = Array.from(document.querySelectorAll("#root > div.sc-fEXmlR.ejmSgi > div:nth-child(3) > div > div > div > div.sc-iBYQkv.bCwfSg > div:nth-child(2) > div > div:nth-child(6) > div:nth-child(2) > div:nth-child(2) > div > div") ?? []);
+          buttonControlFindAttempts++;
+          if (buttonControlFindAttempts > 10) {
+            throw new Error("View #1: Failed to find pagination controls after multiple attempts. Stopping pagination.");
+          }
+        }
+        const mainListNextButton = buttonControls[buttonControls.length - 1]; // Last button is usually "Next"
         if (mainListNextButton && !mainListNextButton.disabled && !mainListNextButton.hasAttribute('disabled') && !mainListNextButton.classList.contains(SELECTOR_MAIN_LIST_PAGINATION_DISABLED_CLASS)) {
             console.log('View #1: Clicking "Next Page" on main vault list...');
             await clickElementAndWait(mainListNextButton, Math.max(BASE_WAIT_TIME * 1.5, 1000), "table tbody tr");
@@ -671,3 +735,24 @@
     console.error('Unhandled error in main execution:', error.message, error.stack);
     alert(`Script failed! Check console for errors. Error: ${error.message}`);
 });
+
+
+/*
+
+We can probably do this via their API using stuff like:
+
+fetch("https://api-ui.hyperliquid.xyz/info", {
+    method: "POST",
+    headers: {
+        "Content-Type": "application/json"
+    },
+    body: JSON.stringify({"aggregateByTime":true,"startTime":1682308800000,"type":"userFillsByTime","user":"0x070a78cadc7a6e4699bba9c3c2e562d0984ce579"})
+}).then(async res => {
+    const json = await res.json();
+    console.log(json)
+});
+
+https://stats-data.hyperliquid.xyz/Mainnet/vaults
+
+The current approach only gets the last 2000 results for trade history and other vault detail tabs.
+ */
