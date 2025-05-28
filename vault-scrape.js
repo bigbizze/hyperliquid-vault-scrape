@@ -3,12 +3,12 @@
     console.log('Starting Enhanced Vault Data Extraction (JSON Output)...');
 
     // --- Configuration ---
-    const BASE_WAIT_TIME = 100; // Base wait time in milliseconds
+    const BASE_WAIT_TIME = 50; // Base wait time in milliseconds
     const TVL_THRESHOLD = 10000;  // Minimum TVL to process a vault
     const APR_THRESHOLD = 0.00001; // Minimum APR (greater than 0% as a decimal)
     const VIEW_ALL_LOAD_TIMEOUT = 20000; // 20 seconds for View All page content (primarily for initial load of View #3)
     // ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING: Set to a number to limit processed vaults for testing, or false to process all.
-    const ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING = false;
+    const ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING = 2;
     const VIEW_ALL_CONTENT_RENDER_DELAY = 1000; // Fixed delay after rows appear in View #3 (primarily for initial load)
 
     // --- Selectors (CRITICAL - VERIFY AND ADJUST THESE FOR YOUR TARGET SITE) ---
@@ -590,7 +590,7 @@
                 }
 
                 vaultDetailURL = null; // Reset for each attempt
-
+                console.log(`Getting information on vault: ${baseVaultData.vaultName}`)
                 try {
                     await clickElementAndWait(clickableElementToDetail, Math.max(BASE_WAIT_TIME * 1.5, 1000), SELECTOR_VAULT_PERFORMANCE_TAB_VIEW2);
                     vaultDetailURL = window.location.href; // Assign here after successful navigation
