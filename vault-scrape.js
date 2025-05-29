@@ -84,7 +84,7 @@
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                "aggregateByTime": true,
+                "aggregateByTime": true, // This is important for getting structured fills
                 "type": "userFills",
                 "user": vaultAddress
             })
@@ -120,41 +120,95 @@
     }
 
     // --- Data Processing Functions ---
+
+    /**
+     * Calculates the maximum drawdown from a series of account values.
+     * @param {Array<Array<number>>} accountValueHistory - Array of [timestamp, value] pairs.
+     * @returns {number|string} The maximum drawdown as a percentage (e.g., 0.1 for 10%), or "N/A".
+     */
+    function calculateMaxDrawdown(accountValueHistory) {
+        if (!accountValueHistory || accountValueHistory.length < 2) {
+            return "N/A";
+        }
+
+        let peak = -Infinity;
+        let maxDrawdown = 0;
+
+        for (const [timestamp, valueStr] of accountValueHistory) {
+            const value = parseFloat(valueStr);
+            if (isNaN(value)) continue; // Skip if value is not a number
+
+            if (value > peak) {
+                peak = value;
+            }
+
+            if (peak > 0) { // Avoid division by zero or issues with negative peaks if data is unusual
+                const drawdown = (peak - value) / peak;
+                if (drawdown > maxDrawdown) {
+                    maxDrawdown = drawdown;
+                }
+            }
+        }
+        return maxDrawdown; // Returns as a decimal, e.g., 0.1 for 10%
+    }
+
+    /**
+     * Calculates the cumulative PnL from a PnL history.
+     * @param {Array<Array<number>>} pnlHistory - Array of [timestamp, pnl_value] pairs, assumed to be cumulative.
+     * @returns {number|string} The final cumulative PnL, or "N/A".
+     */
+    function calculateCumulativePnl(pnlHistory) {
+        if (!pnlHistory || pnlHistory.length === 0) {
+            return "N/A";
+        }
+        // Assuming pnlHistory stores cumulative PnL at each timestamp,
+        // the last entry's PnL value is the total cumulative PnL.
+        const lastPnlEntry = pnlHistory[pnlHistory.length - 1];
+        if (lastPnlEntry && typeof lastPnlEntry[1] !== 'undefined') {
+            return parseFloat(lastPnlEntry[1]);
+        }
+        return "N/A";
+    }
+
+
     function isVaultEligible(vault) {
         const apr = vault.apr || 0;
         const tvl = parseFloat(vault.summary?.tvl || "0");
 
-        // Check TVL threshold
         if (tvl < TVL_THRESHOLD) {
             console.log(`Skipping "${vault.summary?.name}" - TVL ${tvl} below threshold (${TVL_THRESHOLD})`);
             return false;
         }
 
-        // Check APR threshold
         if (apr < APR_THRESHOLD) {
             console.log(`Skipping "${vault.summary?.name}" - APR ${(apr * 100).toFixed(2)}% below threshold (${APR_THRESHOLD * 100}%)`);
             return false;
         }
 
-        // Check blacklist
         const address = vault.summary?.vaultAddress?.toLowerCase();
         if (BLACKLIST_ADDRESSES.includes(address)) {
             console.log(`Skipping "${vault.summary?.name}" - Address ${address} is blacklisted`);
             return false;
         }
-
         return true;
     }
 
     function extractVaultPerformanceFromAPI(vault, vaultDetails) {
-        // Extract performance data from the portfolio data
         const portfolio = vaultDetails.portfolio || [];
-        const allTimeData = portfolio.find(([period]) => period === "allTime");
+        const allTimeDataEntry = portfolio.find(([period]) => period === "allTime");
+        const allTimeData = allTimeDataEntry ? allTimeDataEntry[1] : {}; // allTimeData[1] holds the actual data object
 
         let vlm = "N/A";
-        if (allTimeData && allTimeData[1] && allTimeData[1].vlm) {
-            vlm = allTimeData[1].vlm;
+        if (allTimeData && allTimeData.vlm) {
+            vlm = allTimeData.vlm;
         }
+
+        // Calculate PnL and Max Drawdown using the new functions
+        const pnlHistory = allTimeData.pnlHistory || [];
+        const accountValueHistory = allTimeData.accountValueHistory || [];
+
+        const cumulativePnl = calculateCumulativePnl(pnlHistory);
+        const maxDrawdown = calculateMaxDrawdown(accountValueHistory);
 
         return {
             apr: vault.apr || 0,
@@ -162,8 +216,8 @@
             tvl: vault.summary?.tvl || "0",
             tvlText: `$${parseFloat(vault.summary?.tvl || "0").toLocaleString()}`,
             volume: vlm,
-            maxDrawdown: "N/A", // Would need to calculate from PnL history
-            pnl: "N/A", // Would need to calculate from PnL history
+            maxDrawdown: typeof maxDrawdown === 'number' ? `${(maxDrawdown * 100).toFixed(2)}%` : maxDrawdown, // Store as percentage string
+            pnl: typeof cumulativePnl === 'number' ? cumulativePnl.toFixed(2) : cumulativePnl, // Store as formatted string
             profitShare: `${((vaultDetails.leaderCommission || 0) * 100).toFixed(2)}%`
         };
     }
@@ -180,23 +234,31 @@
         }));
     }
 
-    function processPortfolioData(portfolio) {
+    function processPortfolioData(portfolio) { // This function processes the raw portfolio for easier access later
         const processed = {};
+        if (!portfolio) return processed;
 
         for (const [period, data] of portfolio) {
-            if (typeof data === 'object' && data.accountValueHistory) {
+            if (typeof data === 'object' && data !== null) { // Ensure data is an object
                 processed[period] = {
-                    accountValueHistory: data.accountValueHistory,
+                    accountValueHistory: data.accountValueHistory || [],
                     pnlHistory: data.pnlHistory || [],
                     volume: data.vlm || "0"
                 };
+            } else {
+                 processed[period] = { // Default structure if data is not as expected
+                    accountValueHistory: [],
+                    pnlHistory: [],
+                    volume: "0"
+                };
             }
         }
-
         return processed;
     }
 
+
     function processTradeHistory(tradeHistory) {
+        if (!tradeHistory) return [];
         return tradeHistory.map(trade => ({
             time: new Date(trade.time).toISOString(),
             coin: trade.coin,
@@ -214,6 +276,7 @@
     }
 
     function processDepositsWithdrawals(depositsWithdrawals) {
+        if (!depositsWithdrawals) return [];
         return depositsWithdrawals.map(item => ({
             time: new Date(item.time).toISOString(),
             action: item.delta.type,
@@ -229,6 +292,7 @@
     }
 
     function processFundingHistory(fundingHistory) {
+        if (!fundingHistory) return [];
         return fundingHistory.map(funding => ({
             time: new Date(funding.time).toISOString(),
             coin: funding.delta.coin,
@@ -245,43 +309,36 @@
     const allVaultsData = [];
 
     try {
-        // Step 1: Fetch all vaults
         const vaults = await fetchVaultsList();
         console.log(`Found ${vaults.length} total vaults`);
 
-        // Step 2: Filter eligible vaults
         const eligibleVaults = vaults.filter(isVaultEligible);
         console.log(`Found ${eligibleVaults.length} eligible vaults after filtering`);
 
         const processingLimit = ENABLE_DEBUG_MODE_NUM_VAULTS_TO_PROCESS_TESTING || eligibleVaults.length;
         const vaultsToProcess = eligibleVaults.slice(0, processingLimit);
 
-        console.log(`Processing ${vaultsToProcess.length} vaults...`);
+        console.info(`Processing ${vaultsToProcess.length} vaults...`);
 
-        // Step 3: Process each eligible vault
         for (const vault of vaultsToProcess) {
             try {
-                console.log(`\n--- Processing Vault ${processedCount + 1}/${vaultsToProcess.length}: "${vault.summary?.name}" ---`);
-
+                console.info(`\n--- Processing Vault ${processedCount + 1}/${vaultsToProcess.length}: "${vault.summary?.name} :: ${vault.summary.vaultAddress}" ---`);
                 const vaultAddress = vault.summary?.vaultAddress;
                 if (!vaultAddress) {
                     console.warn('No vault address found, skipping...');
                     continue;
                 }
 
-                // Fetch detailed vault information
                 const vaultDetails = await fetchVaultDetails(vaultAddress);
 
-                // Extract performance data
+                // The raw portfolio data is vaultDetails.portfolio
+                // extractVaultPerformanceFromAPI now uses this directly to get pnlHistory and accountValueHistory
                 const performanceData = extractVaultPerformanceFromAPI(vault, vaultDetails);
 
-                // Process followers (equivalent to depositors tab)
+                // processPortfolioData is used to structure the full historical data for storage
+                const structuredPortfolioData = processPortfolioData(vaultDetails.portfolio || []);
+
                 const depositorsData = processFollowers(vaultDetails.followers || []);
-
-                // Process portfolio data (historical performance)
-                const portfolioData = processPortfolioData(vaultDetails.portfolio || []);
-
-                // Fetch additional data
                 let tradeHistoryData = [];
                 let depositsWithdrawalsData = [];
                 let fundingHistoryData = [];
@@ -292,42 +349,34 @@
                         const tradeHistory = await fetchTradeHistory(vaultAddress);
                         tradeHistoryData = processTradeHistory(tradeHistory || []);
                     } catch (error) {
-                        console.warn('Failed to fetch trade history:', error.message);
+                        console.warn(`Failed to fetch trade history for ${vaultAddress}:`, error.message);
                     }
                 }
-
                 if (INCLUDE_DEPOSITS_WITHDRAWALS) {
                     try {
                         console.log('Fetching deposits/withdrawals...');
                         const depositsWithdrawals = await fetchDepositsWithdrawals(vaultAddress);
                         depositsWithdrawalsData = processDepositsWithdrawals(depositsWithdrawals || []);
                     } catch (error) {
-                        console.warn('Failed to fetch deposits/withdrawals:', error.message);
+                        console.warn(`Failed to fetch deposits/withdrawals for ${vaultAddress}:`, error.message);
                     }
                 }
-
                 if (INCLUDE_FUNDING_HISTORY) {
                     try {
                         console.log('Fetching funding history...');
                         const fundingHistory = await fetchFundingHistory(vaultAddress);
                         fundingHistoryData = processFundingHistory(fundingHistory || []);
                     } catch (error) {
-                        console.warn('Failed to fetch funding history:', error.message);
+                        console.warn(`Failed to fetch funding history for ${vaultAddress}:`, error.message);
                     }
                 }
 
-                // Compile comprehensive vault data
                 const comprehensiveVaultData = {
-                    // Basic info
                     vaultName: vaultDetails.name || vault.summary?.name || "Unknown",
                     address: vaultAddress,
                     leader: vaultDetails.leader || vault.summary?.leader,
                     description: vaultDetails.description || "",
-
-                    // Performance data
-                    vaultPerformance: performanceData,
-
-                    // Vault details
+                    vaultPerformance: performanceData, // This now includes calculated PnL and Max Drawdown
                     isClosed: vaultDetails.isClosed || vault.summary?.isClosed || false,
                     allowDeposits: vaultDetails.allowDeposits !== false,
                     alwaysCloseOnWithdraw: vaultDetails.alwaysCloseOnWithdraw || false,
@@ -336,40 +385,27 @@
                     maxDistributable: vaultDetails.maxDistributable || 0,
                     maxWithdrawable: vaultDetails.maxWithdrawable || 0,
                     relationship: vaultDetails.relationship || { type: "normal" },
-
-                    // Historical data
-                    portfolioData: portfolioData,
-
-                    // Equivalent to bottom tabs data
+                    portfolioData: structuredPortfolioData, // Store the structured historical data
                     depositorsData: depositorsData,
                     tradeHistoryData: tradeHistoryData,
                     depositsWithdrawalsData: depositsWithdrawalsData,
                     fundingHistoryData: fundingHistoryData,
-
-                    // Raw API data for reference
                     rawVaultSummary: vault.summary,
                     rawVaultDetails: vaultDetails,
-
-                    // Timestamps
                     dataFetchedAt: new Date().toISOString(),
                     createTimeMillis: vault.summary?.createTimeMillis || null
                 };
 
                 allVaultsData.push(comprehensiveVaultData);
                 processedCount++;
-
-                console.log(`✓ Processed "${comprehensiveVaultData.vaultName}" (${depositorsData.length} depositors, ${tradeHistoryData.length} trades, ${depositsWithdrawalsData.length} deposits/withdrawals, ${fundingHistoryData.length} funding records)`);
-
-                // Small delay to be respectful to the API
+                console.log(`✓ Processed "${comprehensiveVaultData.vaultName}" (PnL: ${performanceData.pnl}, Max DD: ${performanceData.maxDrawdown}, ${depositorsData.length} depositors, ${tradeHistoryData.length} trades, ${depositsWithdrawalsData.length} D/W, ${fundingHistoryData.length} funding)`);
                 await sleep(150);
 
             } catch (error) {
-                console.error(`Error processing vault "${vault.summary?.name}":`, error.message);
-                // Continue with next vault
+                console.error(`Error processing vault "${vault.summary?.name}":`, error.message, error.stack);
             }
         }
 
-        // Step 4: Download results
         console.log(`\n=== Extraction Complete ===`);
         console.log(`Successfully processed: ${processedCount} vaults`);
         console.log(`Total data collected: ${allVaultsData.length} vault records`);
@@ -377,8 +413,6 @@
         if (allVaultsData.length > 0) {
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
             downloadJSON(allVaultsData, `vault_data_api_${timestamp}.json`);
-
-            // Also create a summary file
             const summary = {
                 extractionMetadata: {
                     totalVaultsFound: vaults.length,
@@ -386,21 +420,15 @@
                     processedVaults: processedCount,
                     timestamp: new Date().toISOString(),
                     config: {
-                        TVL_THRESHOLD,
-                        APR_THRESHOLD,
-                        INCLUDE_TRADE_HISTORY,
-                        INCLUDE_DEPOSITS_WITHDRAWALS,
-                        INCLUDE_FUNDING_HISTORY,
-                        BLACKLIST_ADDRESSES
+                        TVL_THRESHOLD, APR_THRESHOLD, INCLUDE_TRADE_HISTORY,
+                        INCLUDE_DEPOSITS_WITHDRAWALS, INCLUDE_FUNDING_HISTORY, BLACKLIST_ADDRESSES
                     }
                 },
-                vaultsSummary: allVaultsData.map(vault => ({
-                    name: vault.vaultName,
-                    address: vault.address,
-                    apr: vault.vaultPerformance.apr,
-                    tvl: vault.vaultPerformance.tvl,
-                    depositors: vault.depositorsData.length,
-                    isClosed: vault.isClosed
+                vaultsSummary: allVaultsData.map(v => ({
+                    name: v.vaultName, address: v.address,
+                    apr: v.vaultPerformance.aprText, tvl: v.vaultPerformance.tvlText,
+                    pnl: v.vaultPerformance.pnl, maxDrawdown: v.vaultPerformance.maxDrawdown,
+                    depositors: v.depositorsData.length, isClosed: v.isClosed
                 }))
             };
             downloadJSON(summary, `vault_summary_api_${timestamp}.json`);
@@ -412,7 +440,6 @@
         console.error('Critical error in main execution:', error);
         alert(`Script failed! Error: ${error.message}`);
     }
-
 })().catch(error => {
     console.error('Unhandled error:', error);
     alert(`Script failed! Error: ${error.message}`);
