@@ -45,6 +45,10 @@
             try {
                 const response = await fetch(url, options);
                 if (!response.ok) {
+                    if (response.status === 429) {
+                        console.warn(`Rate limit hit. Retrying after ${1000 * attempt}ms...`);
+                        await sleep(1000 * attempt); // Exponential backoff
+                    }
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
                 return await response.json();
